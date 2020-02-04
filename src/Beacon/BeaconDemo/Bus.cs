@@ -22,7 +22,7 @@ namespace BeaconDemo
         private readonly TimeSpan m_deadNodeTimeout = TimeSpan.FromSeconds(10);
 
         // we will use this to check if we already know about the node
-        public class NodeKey
+        private class NodeKey
         {
             public NodeKey(string name, int port)
             {
@@ -34,9 +34,7 @@ namespace BeaconDemo
 
             public string Name { get; }
             public int Port { get; }
-
             public string Address { get; }
-
             public string HostName { get; private set; }
 
             protected bool Equals(NodeKey other)
@@ -46,6 +44,8 @@ namespace BeaconDemo
 
             public override bool Equals(object obj)
             {
+                if (obj == null) return false;
+
                 if (ReferenceEquals(null, obj)) return false;
                 if (ReferenceEquals(this, obj)) return true;
                 if (obj.GetType() != this.GetType()) return false;
@@ -66,23 +66,23 @@ namespace BeaconDemo
             }
         }
 
-        private readonly int m_broadcastPort;
+        private readonly int broadcastPort;
 
-        private readonly NetMQActor m_actor;
+        private readonly NetMQActor actor;
 
-        private PublisherSocket m_publisher;
-        private SubscriberSocket m_subscriber;
-        private NetMQBeacon m_beacon;
-        private NetMQPoller m_poller;
-        private PairSocket m_shim;
-        private readonly Dictionary<NodeKey, DateTime> m_nodes; // value is the last time we "saw" this node
-        private int m_randomPort;
+        private PublisherSocket publisher;
+        private SubscriberSocket subscriber;
+        private NetMQBeacon beacon;
+        private NetMQPoller poller;
+        private PairSocket shim;
+        private readonly Dictionary<NodeKey, DateTime> nodes; // value is the last time we "saw" this node
+        private int randomPort;
 
         private Bus(int broadcastPort)
         {
-            m_nodes = new Dictionary<NodeKey, DateTime>();
-            m_broadcastPort = broadcastPort;
-            m_actor = NetMQActor.Create(RunActor);
+            nodes = new Dictionary<NodeKey, DateTime>();
+            this.broadcastPort = broadcastPort;
+            actor = NetMQActor.Create(RunActor);
         }
 
         /// <summary>
@@ -91,87 +91,87 @@ namespace BeaconDemo
         /// </summary>
         public static NetMQActor Create(int broadcastPort)
         {
-            Bus node = new Bus(broadcastPort);
-            return node.m_actor;
+            var node = new Bus(broadcastPort);
+            return node.actor;
         }
 
         private void RunActor(PairSocket shim)
         {
             // save the shim to the class to use later
-            m_shim = shim;
+            this.shim = shim;
 
             // create all subscriber, publisher and beacon
-            using (m_subscriber = new SubscriberSocket())
-            using (m_publisher = new PublisherSocket())
-            using (m_beacon = new NetMQBeacon())
+            using (subscriber = new SubscriberSocket())
+            using (publisher = new PublisherSocket())
+            using (beacon = new NetMQBeacon())
             {
                 // listen to actor commands
-                m_shim.ReceiveReady += OnShimReady;
+                this.shim.ReceiveReady += OnShimReady;
 
                 // subscribe to all messages
-                m_subscriber.Subscribe("");
+                subscriber.Subscribe("");
 
                 // we bind to a random port, we will later publish this port
                 // using the beacon
-                m_randomPort = m_subscriber.BindRandomPort("tcp://*");
-                Console.WriteLine("Bus subscriber is bound to {0}", m_subscriber.Options.LastEndpoint);
+                randomPort = subscriber.BindRandomPort("tcp://*");
+                Console.WriteLine("Bus subscriber is bound to {0}", subscriber.Options.LastEndpoint);
 
                 // listen to incoming messages from other publishers, forward them to the shim
-                m_subscriber.ReceiveReady += OnSubscriberReady;
+                subscriber.ReceiveReady += OnSubscriberReady;
 
                 // configure the beacon to listen on the broadcast port
-                Console.WriteLine("Beacon is being configured to UDP port {0}", m_broadcastPort);
-                m_beacon.Configure(m_broadcastPort);
+                Console.WriteLine("Beacon is being configured to UDP port {0}", broadcastPort);
+                beacon.Configure(broadcastPort);
 
                 // publishing the random port to all other nodes
-                Console.WriteLine("Beacon is publishing the Bus subscriber port {0}", m_randomPort);
-                m_beacon.Publish(m_randomPort.ToString(), TimeSpan.FromSeconds(1));
+                Console.WriteLine("Beacon is publishing the Bus subscriber port {0} every second", randomPort);
+                beacon.Publish(randomPort.ToString(), TimeSpan.FromSeconds(1));
 
                 // Subscribe to all beacon on the port
-                Console.WriteLine("Beacon is subscribing to all beacons on UDP port {0}", m_broadcastPort);
-                m_beacon.Subscribe("");
+                Console.WriteLine("Beacon is subscribing to all beacons on UDP port {0}", broadcastPort);
+                beacon.Subscribe("");
 
                 // listen to incoming beacons
-                m_beacon.ReceiveReady += OnBeaconReady;
+                beacon.ReceiveReady += OnBeaconReady;
 
                 // Create a timer to clear dead nodes
-                NetMQTimer timer = new NetMQTimer(TimeSpan.FromSeconds(1));
+                var timer = new NetMQTimer(TimeSpan.FromSeconds(1));
                 timer.Elapsed += ClearDeadNodes;
 
                 // Create and configure the poller with all sockets and the timer
-                m_poller = new NetMQPoller { m_shim, m_subscriber, m_beacon, timer };
+                poller = new NetMQPoller { this.shim, subscriber, beacon, timer };
 
                 // signal the actor that we finished with configuration and
                 // ready to work
-                m_shim.SignalOK();
+                this.shim.SignalOK();
 
                 // polling until cancelled
-                m_poller.Run();
+                poller.Run();
             }
         }
 
         private void OnShimReady(object sender, NetMQSocketEventArgs e)
         {
             // new actor command
-            string command = m_shim.ReceiveFrameString();
+            var command = shim.ReceiveFrameString();
 
             // check if we received end shim command
             if (command == NetMQActor.EndShimMessage)
             {
                 // we cancel the socket which dispose and exist the shim
-                m_poller.Stop();
+                poller.Stop();
             }
             else if (command == PublishCommand)
             {
                 // it is a publish command
                 // we just forward everything to the publisher until end of message
-                NetMQMessage message = m_shim.ReceiveMultipartMessage();
-                m_publisher.SendMultipartMessage(message);
+                var message = shim.ReceiveMultipartMessage();
+                publisher.SendMultipartMessage(message);
             }
             else if (command == GetHostAddressCommand)
             {
-                var address = m_beacon.BoundTo + ":" + m_randomPort;
-                m_shim.SendFrame(address);
+                var address = beacon.BoundTo + ":" + randomPort;
+                shim.SendFrame(address);
             }
         }
 
@@ -179,49 +179,69 @@ namespace BeaconDemo
         {
             // we got a new message from the bus
             // let's forward everything to the shim
-            NetMQMessage message = m_subscriber.ReceiveMultipartMessage();
-            m_shim.SendMultipartMessage(message);
+            var message = subscriber.ReceiveMultipartMessage();
+            shim.SendMultipartMessage(message);
         }
 
         private void OnBeaconReady(object sender, NetMQBeaconEventArgs e)
         {
             // we got another beacon
             // let's check if we already know about the beacon
-            var message = m_beacon.Receive();
+            var message = beacon.Receive();
             int port;
             int.TryParse(message.String, out port);
 
             NodeKey node = new NodeKey(message.PeerHost, port);
 
             // check if node already exist
-            if (!m_nodes.ContainsKey(node))
+            if (!nodes.ContainsKey(node))
             {
                 // we have a new node, let's add it and connect to subscriber
-                m_nodes.Add(node, DateTime.Now);
-                m_publisher.Connect(node.Address);
-                m_shim.SendMoreFrame(AddedNodeCommand).SendFrame(node.Address);
+                nodes.Add(node, DateTime.Now);
+                publisher.Connect(node.Address);
+                shim.SendMoreFrame(AddedNodeCommand).SendFrame(node.Address);
             }
             else
             {
                 //Console.WriteLine("Node {0} is not a new beacon.", node);
-                m_nodes[node] = DateTime.Now;
+                nodes[node] = DateTime.Now;
+            }
+        }
+
+        private void DumpNodes(DateTime now, string title)
+        {
+            Console.WriteLine("---------------------------------------------");
+            Console.WriteLine($"{nodes.Count} nodes ({title}):");
+            foreach (var key in nodes.Keys)
+            {
+                var datetime = nodes[key];
+                var isDead = now > datetime + m_deadNodeTimeout;
+                Console.WriteLine($"name={key.Name}, host={key.HostName}, port={key.Port}, dead={isDead}");
             }
         }
 
         private void ClearDeadNodes(object sender, NetMQTimerEventArgs e)
         {
+            //Console.WriteLine("");
+            //Console.WriteLine($"ClearDeadNodes");
+
+            var now = DateTime.Now;
+            //DumpNodes(now, "BeforeClearDateNodes");
+
             // create an array with the dead nodes
-            var deadNodes = m_nodes.
-                Where(n => DateTime.Now > n.Value + m_deadNodeTimeout)
-                .Select(n => n.Key).ToArray();
+            var deadNodes = nodes.Where(n => now > n.Value + m_deadNodeTimeout)
+                                 .Select(n => n.Key)
+                                 .ToArray();
 
             // remove all the dead nodes from the nodes list and disconnect from the publisher
             foreach (var node in deadNodes)
             {
-                m_nodes.Remove(node);
-                m_publisher.Disconnect(node.Address);
-                m_shim.SendMoreFrame(RemovedNodeCommand).SendFrame(node.Address);
+                nodes.Remove(node);
+                publisher.Disconnect(node.Address);
+                shim.SendMoreFrame(RemovedNodeCommand).SendFrame(node.Address);
             }
+
+            //DumpNodes(now, "AfterClearDateNodes");
         }
     }
 }
